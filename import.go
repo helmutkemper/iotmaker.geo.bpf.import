@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/helmutkemper/gOsm/geoMath"
 	"github.com/helmutkemper/gOsm/utilMath"
 	"github.com/helmutkemper/go-radix"
 	iotmaker_db_interface "github.com/helmutkemper/iotmaker.db.interface"
-	"github.com/helmutkemper/mongodb"
+	iotmaker_geo_osm "github.com/helmutkemper/iotmaker.geo.osm"
 	"github.com/helmutkemper/osmpbf"
 	log "github.com/helmutkemper/seelog"
 	"github.com/helmutkemper/util"
@@ -32,7 +31,7 @@ type wayConverted struct {
 }
 
 var (
-	configSkipExistentData    = true
+	configSkipExistentData    = false
 	configNodesPerInteraction = 1000000
 	nodesSearchCount          = 0
 
@@ -46,7 +45,7 @@ var (
 
 	radixTreeWays *radix.Tree
 
-	waysListProcessed = make([]geoMath.WayStt, configNodesPerInteraction)
+	waysListProcessed = make([]iotmaker_geo_osm.WayStt, configNodesPerInteraction)
 	waysList          = make([]osmpbf.Way, configNodesPerInteraction)
 )
 
@@ -111,7 +110,7 @@ func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFi
 					}
 				}
 
-				point := geoMath.PointStt{}
+				point := iotmaker_geo_osm.PointStt{}
 				err = point.SetLngLatDegrees(node.Lon, node.Lat)
 				if err != nil {
 					_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.SetLngLatDegrees.error: %v", err)
@@ -125,7 +124,6 @@ func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFi
 				point.Visible = node.Info.Visible
 				point.Id = node.ID
 				point.MakeGeoJSonFeature()
-				point.Prepare()
 				err, _ = point.MakeMD5()
 				if err != nil {
 					_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.MakeMD5.error: %v", err)
@@ -153,7 +151,7 @@ func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFi
 
 				if waysInteractionCount >= configNodesPerInteraction {
 					process(tmpFile)
-					populate(tmpFile)
+					populate(db, tmpFile)
 					waysListLineCount = 0
 					waysInteractionCount = 0
 				}
@@ -164,7 +162,7 @@ func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFi
 				}
 
 				waysList[waysListLineCount] = *way
-				waysListProcessed[waysListLineCount] = geoMath.WayStt{
+				waysListProcessed[waysListLineCount] = iotmaker_geo_osm.WayStt{
 					Id:        way.ID,
 					Loc:       make([][2]float64, len(way.NodeIDs)),
 					Rad:       make([][2]float64, len(way.NodeIDs)),
@@ -198,7 +196,7 @@ func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFi
 				if waysInteractionCount != 0 {
 					waysInteractionCount = 0
 					process(tmpFile)
-					populate(tmpFile)
+					populate(db, tmpFile)
 				}
 
 			default:
@@ -475,7 +473,6 @@ func verify(db iotmaker_db_interface.DbFunctionsInterface) {
 			geoMathWay := waysListProcessed[wayKey]
 
 			geoMathWay.MakeGeoJSonFeature()
-			geoMathWay.Prepare()
 			geoMathWay.Init()
 			geoMathWay.MakeMD5()
 
@@ -486,7 +483,7 @@ func verify(db iotmaker_db_interface.DbFunctionsInterface) {
 
 			if geoMathWay.Tag["type"] == "multipolygon" || geoMathWay.IsPolygon() == true {
 
-				polygon := geoMath.PolygonStt{}
+				polygon := iotmaker_geo_osm.PolygonStt{}
 				polygon.Id = geoMathWay.Id
 				polygon.Tag = geoMathWay.Tag
 				polygon.UId = int64(geoMathWay.UId)
@@ -495,7 +492,6 @@ func verify(db iotmaker_db_interface.DbFunctionsInterface) {
 				polygon.TimeStamp = geoMathWay.TimeStamp
 				polygon.Version = int64(geoMathWay.Version)
 				polygon.Visible = geoMathWay.Visible
-				polygon.Prepare()
 				polygon.AddWayAsPolygon(&geoMathWay)
 				polygon.MakeGeoJSonFeature()
 				polygon.Init()
@@ -503,10 +499,9 @@ func verify(db iotmaker_db_interface.DbFunctionsInterface) {
 
 				deleteTagsUnnecessary(&polygon.Tag)
 
-				polygonToDb.Insert(polygon)
-				err := polygonToDb.GetLastError()
+				err = db.Insert("polygon", polygon)
 				if err != nil {
-					fmt.Printf("polygonToDb.Insert.Error: %v\n", err.Error())
+					_ = log.Errorf("gosmImport.verify.polygon.insert.error: %v", err)
 				}
 			}
 		}
