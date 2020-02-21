@@ -92,7 +92,7 @@ func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFi
 			switch v.(type) {
 
 			case *osmpbf.Node:
-
+				continue
 				node := v.(*osmpbf.Node)
 
 				if TestTagNodeToDiscard(&node.Tags) == true {
@@ -242,6 +242,21 @@ func deleteTagsUnnecessary(tag *map[string]string) {
 	delete(*tag, "converted_by")
 	delete(*tag, "created_by")
 	delete(*tag, "wikipedia")
+
+	return
+	// fixme: pode ser que isto seja necessários em alguns projetos - início
+	delete(*tag, "noexit")
+	delete(*tag, "barrier")
+	t := *tag
+	if t["highway"] == "crossing" {
+		delete(*tag, "highway")
+	}
+	if t["crossing"] == "marked" {
+		delete(*tag, "crossing")
+	}
+	if t["highway"] == "motorway_junction" {
+		delete(*tag, "highway")
+	}
 }
 
 // pt_br: Adiciona osm.id, longitude e latitude em um arquivo binário, afim de fazer
@@ -400,6 +415,7 @@ func populate(db iotmaker_db_interface.DbFunctionsInterface, inputFile string) {
 					err, coordinateFromServer := getNodeByApiOsm(idNode)
 					if err != nil {
 
+						_ = log.Errorf("gosmImport.populate.getNodeByApiOsm.error: %v", err)
 						// todo: arquivar em banco os errors na hora de pegar
 						//waysListProcessed[listKey].Data["error"] = true
 
