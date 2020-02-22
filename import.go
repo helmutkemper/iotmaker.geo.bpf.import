@@ -3,6 +3,8 @@ package iotmaker_geo_pbf_import
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/helmutkemper/gOsm/utilMath"
 	"github.com/helmutkemper/go-radix"
@@ -13,10 +15,23 @@ import (
 	"github.com/helmutkemper/util"
 	"go.mongodb.org/mongo-driver/bson"
 	"io"
+	"io/ioutil"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 )
+
+type Import struct {
+	nodesCount     int
+	waysCount      int
+	relationsCount int
+	othersCount    int
+
+	nodesFound     chan int
+	nodesIgnored   chan int
+	nodesProcessed chan int
+}
 
 type wayError struct {
 	Id        int64
@@ -32,7 +47,7 @@ type wayConverted struct {
 
 var (
 	configSkipExistentData    = false
-	configNodesPerInteraction = 1000000
+	configNodesPerInteraction = 100
 	nodesSearchCount          = 0
 
 	nodesProcessMapGlobalTotal = 0
@@ -59,6 +74,405 @@ type Way struct {
 	Tags    map[string]string
 	NodeIDs []int64
 	Info    osmpbf.Info
+}
+
+func (el *Import) CountElements(mapFile string) (error, int, int, int, int) {
+
+	var v interface{}
+
+	f, err := os.Open(mapFile)
+	if err != nil {
+		return err, 0, 0, 0, 0
+	}
+
+	d := osmpbf.NewDecoder(f)
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return err, 0, 0, 0, 0
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+		} else if err != nil {
+			return err, 0, 0, 0, 0
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+				el.nodesCount += 1
+
+			case *osmpbf.Way:
+				el.waysCount += 1
+
+			case *osmpbf.Relation:
+				el.relationsCount += 1
+
+			default:
+				el.othersCount += 1
+
+			}
+		}
+	}
+
+	err = f.Close()
+	if err != nil {
+		return err, el.nodesCount, el.waysCount, el.relationsCount, el.othersCount
+	}
+
+	return nil, el.nodesCount, el.waysCount, el.relationsCount, el.othersCount
+}
+
+type ToJSonCache struct {
+	ID  int64
+	Lat float64
+	Lon float64
+}
+
+func (el *Import) MakeFileId(id int) int {
+	return id % 500000
+}
+
+func (el *Import) ExtractNodes(mapFile, dirOut string) error {
+
+	if strings.HasSuffix(dirOut, "/") == false {
+		dirOut += "/"
+	}
+
+	var v interface{}
+	var JSonOut []byte
+	var tmp ToJSonCache
+	var nodesFound = 0
+	var nodesIgnored = 0
+	var nodesProcessed = 0
+
+	el.nodesFound = make(chan int, 1)
+	el.nodesIgnored = make(chan int, 1)
+	el.nodesProcessed = make(chan int, 1)
+
+	f, err := os.Open(mapFile)
+	if err != nil {
+		return err
+	}
+
+	d := osmpbf.NewDecoder(f)
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return err
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+				tmp.ID = v.(*osmpbf.Node).ID
+				tmp.Lat = v.(*osmpbf.Node).Lat
+				tmp.Lon = v.(*osmpbf.Node).Lon
+
+				idSting := strconv.FormatInt(tmp.ID, 10)
+				filePath := dirOut + idSting + ".json"
+
+				// todo: make a function - start
+				nodesFound += 1
+				if cap(el.nodesFound) == 0 {
+					<-el.nodesFound
+				}
+				el.nodesFound <- nodesFound
+				// todo: make a function - end
+
+				if util.CheckFileExists(filePath) == true {
+
+					// todo: make a function - start
+					nodesIgnored += 1
+					if cap(el.nodesIgnored) == 0 {
+						<-el.nodesIgnored
+					}
+					el.nodesIgnored <- nodesIgnored
+					// todo: make a function - end
+
+					continue
+				}
+
+				// todo: make a function - start
+				nodesProcessed += 1
+				if cap(el.nodesProcessed) == 0 {
+					<-el.nodesProcessed
+				}
+				el.nodesProcessed <- nodesProcessed
+				// todo: make a function - end
+
+				JSonOut, err = json.Marshal(tmp)
+				if err != nil {
+					return err
+				}
+
+				err = ioutil.WriteFile(filePath, JSonOut, 0644)
+				if err != nil {
+					return err
+				}
+
+			case *osmpbf.Way:
+				break
+
+			case *osmpbf.Relation:
+				break
+
+			}
+		}
+	}
+
+	err = f.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (el *Import) ProcessWays(db iotmaker_db_interface.DbFunctionsInterface, mapFile, tmpFile string) {
+
+	var v interface{}
+	var totalFromQuery int64
+
+	f, err := os.Open(mapFile)
+	if err != nil {
+		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.os.Open.error: %v", err)
+	}
+
+	d := osmpbf.NewDecoder(f)
+
+	// use more memory from the start, it is faster
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+
+	// start decoding with several goroutines, it is faster
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.d.Start.error: %v", err)
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+		} else if err != nil {
+			_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.d.Decode.error: %v", err)
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+				continue
+
+			case *osmpbf.Way:
+
+				way := v.(*osmpbf.Way)
+
+				if configSkipExistentData == true {
+					err, totalFromQuery = db.Count("way", bson.M{"id": v.(*osmpbf.Way).ID})
+					if err != nil {
+						_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.db.way.count.error: %v", err)
+					}
+
+					if totalFromQuery != 0 {
+						continue
+					}
+				}
+
+				if waysInteractionCount >= configNodesPerInteraction {
+					process(tmpFile)
+					populate(db, tmpFile)
+					waysListLineCount = 0
+					waysInteractionCount = 0
+				}
+
+				if waysInteractionCount == 0 {
+					nodesSearchCount = 0
+					radixTreeWays = radix.New()
+				}
+
+				waysList[waysListLineCount] = *way
+				waysListProcessed[waysListLineCount] = iotmaker_geo_osm.WayStt{
+					Id:        way.ID,
+					Loc:       make([][2]float64, len(way.NodeIDs)),
+					Rad:       make([][2]float64, len(way.NodeIDs)),
+					Tag:       way.Tags,
+					Data:      make(map[string]string),
+					UId:       int64(way.Info.Uid),
+					ChangeSet: way.Info.Changeset,
+					User:      way.Info.User,
+					TimeStamp: way.Info.Timestamp,
+					Version:   int64(way.Info.Version),
+					Visible:   way.Info.Visible,
+				}
+
+				for _, idNode := range way.NodeIDs {
+					nodesSearchCount += 1
+					idNodeString := strconv.FormatInt(idNode, 10)
+					_, found := radixTreeWays.Get(idNodeString)
+					if found == false {
+						radixTreeWays.Insert(idNodeString, [2]float64{0.0, 0.0})
+					}
+				}
+
+				waysCount += 1
+				waysListLineCount += 1
+				waysInteractionCount += 1
+
+			case *osmpbf.Relation:
+
+				//relation := v.(*osmpbf.Relation)
+
+				if waysInteractionCount != 0 {
+					waysInteractionCount = 0
+					process(tmpFile)
+					populate(db, tmpFile)
+				}
+
+			default:
+				_ = log.Error("unknown type %T\n", v)
+			}
+		}
+	}
+
+	err = f.Close()
+	if err != nil {
+		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.f.close.error: %v", err)
+	}
+}
+
+func (el *Import) AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
+
+	if idIn == 0 || (lonIn == 0.0 && latIn == 0.0) {
+		return errors.New("zero as value")
+	}
+
+	nodesFile, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+	defer nodesFile.Close()
+
+	bufWriter := new(bytes.Buffer)
+
+	lonIn = util.Round(lonIn, 0.5, 8.0)
+	latIn = util.Round(latIn, 0.5, 8.0)
+
+	err = binary.Write(bufWriter, binary.BigEndian, idIn)
+	if err != nil {
+		return err
+	}
+
+	_, err = nodesFile.Write(bufWriter.Bytes())
+	if err != nil {
+		return err
+	}
+
+	bufWriter = new(bytes.Buffer)
+
+	err = binary.Write(bufWriter, binary.BigEndian, lonIn)
+	if err != nil {
+		return err
+	}
+
+	_, err = nodesFile.Write(bufWriter.Bytes())
+	if err != nil {
+		return err
+	}
+
+	bufWriter = new(bytes.Buffer)
+
+	err = binary.Write(bufWriter, binary.BigEndian, latIn)
+	if err != nil {
+		return err
+	}
+	_, err = nodesFile.Write(bufWriter.Bytes())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (el *Import) FindLonLatByIdInFile(inputFile string, idToFind int64) (error, float64, float64) {
+	bufReader := &bytes.Reader{}
+
+	idByte := make([]byte, 8)
+	float64Byte := make([]byte, 8)
+
+	var idInt64 int64
+	var lonFloat64, latFloat64 float64
+
+	nodesFile, err := os.OpenFile(inputFile, os.O_RDONLY|os.O_CREATE, 0600)
+	if err != nil {
+		return err, 0.0, 0.0
+	}
+
+	defer nodesFile.Close()
+
+	var filePointer int64 = 0
+
+	for {
+		// read node id
+		_, err = nodesFile.ReadAt(idByte, filePointer)
+		if err == io.EOF {
+			nodesFile.Close()
+			break
+		}
+
+		filePointer += 8
+
+		bufReader = bytes.NewReader(idByte)
+		err = binary.Read(bufReader, binary.BigEndian, &idInt64)
+		if err != nil {
+			return err, 0.0, 0.0
+		}
+
+		if idInt64 != idToFind {
+			// lon e lat pointers
+			filePointer += 8 + 8
+			continue
+		}
+
+		// read node lon
+		_, err = nodesFile.ReadAt(float64Byte, filePointer)
+		if err != nil {
+			return err, 0.0, 0.0
+		}
+
+		filePointer += 8
+
+		bufReader = bytes.NewReader(float64Byte)
+		err = binary.Read(bufReader, binary.BigEndian, &lonFloat64)
+		if err != nil {
+			return err, 0.0, 0.0
+		}
+
+		// read node lat
+		_, err = nodesFile.ReadAt(float64Byte, filePointer)
+		if err != nil {
+			return err, 0.0, 0.0
+		}
+
+		filePointer += 8
+
+		bufReader = bytes.NewReader(float64Byte)
+		err = binary.Read(bufReader, binary.BigEndian, &latFloat64)
+		if err != nil {
+			return err, 0.0, 0.0
+		}
+
+		return nil, lonFloat64, latFloat64
+	}
+
+	return errors.New("id not found"), 0.0, 0.0
 }
 
 func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFile, tmpFile string) {
@@ -268,6 +682,10 @@ func deleteTagsUnnecessary(tag *map[string]string) {
 // muito grande de dados é inserido.
 func AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
 
+	if idIn == 0 || (lonIn == 0.0 && latIn == 0.0) {
+		_ = log.Errorf("AppendNodeToFile.values.error: zero as value")
+	}
+
 	nodesFile, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		_ = log.Errorf("AppendNodeToFile.os.OpenFile.error: %v", err.Error())
@@ -426,6 +844,10 @@ func populate(db iotmaker_db_interface.DbFunctionsInterface, inputFile string) {
 						//if wayErrorToDb.Count(&query) == 0 {
 						//  wayErrorToDb.Insert(wayError)
 						//}
+					}
+
+					if coordinateFromServer.Lon == 0 && coordinateFromServer.Lat == 0 {
+						continue
 					}
 
 					err = AppendNodeToFile(inputFile, coordinateFromServer.Id, coordinateFromServer.Lon, coordinateFromServer.Lat)

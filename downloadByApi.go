@@ -73,25 +73,39 @@ type NodesRefTagStt struct {
 
 // faz o download das informações de um node
 func getNodeByApiOsm(idNode int64) (error, NodesTagStt) {
+	var body []byte
+	var err error
+	var fileName = "/media/kemper/c5d4fd1f-1a7e-4bdd-8124-e2ad60e187761/nodes/" + strconv.FormatInt(idNode, 10) + ".xml"
+
 	nodeRemote := OsmNodeTagStt{}
 
-	resp, err := http.Get(kOsmApi06UrlNode + strconv.FormatInt(idNode, 10))
-	if err != nil {
-		fmt.Printf("getNodeByApiOsm.http.Get.error: %v", err)
-		return err, NodesTagStt{}
-	}
+	body, err = ioutil.ReadFile(fileName)
+	if err != nil || len(body) == 0 {
+		resp, err := http.Get(kOsmApi06UrlNode + strconv.FormatInt(idNode, 10))
+		if err != nil {
+			fmt.Printf("getNodeByApiOsm.http.Get.error: %v\nid: %v\n", err, idNode)
+			return errors.New("osm api return error"), NodesTagStt{}
+		}
 
-	body, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
+		body, err = ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if len(body) != 0 {
+			err = ioutil.WriteFile(fileName, body, 0644)
+			if err != nil {
+				fmt.Printf("getNodeByApiOsm.ioutil.WriteFile.error: %v\nid: %v\n", err, idNode)
+			}
+		}
+	}
 
 	err = xml.Unmarshal(body, &nodeRemote)
 	if err != nil {
-		fmt.Printf("getNodeByApiOsm.xml.Unmarshal.error: %v\n", err)
+		fmt.Printf("getNodeByApiOsm.xml.Unmarshal.error: %v\nid: %v\n", err, idNode)
 		return err, NodesTagStt{}
 	}
 
 	if nodeRemote.Node.Lat == 0.0 && nodeRemote.Node.Lon == 0.0 {
-		fmt.Printf("getNodeByApiOsm.nodeRemote.Lat == 0.0 && getNodeByApiOsm.nodeRemote.Lon == 0.0\n")
+		fmt.Printf("getNodeByApiOsm.nodeRemote.Lat == 0.0 && getNodeByApiOsm.nodeRemote.Lon == 0.0\nid: %v\n", idNode)
 		return err, NodesTagStt{}
 	}
 
