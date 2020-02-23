@@ -131,11 +131,81 @@ type ToJSonCache struct {
 	Lon float64
 }
 
-func (el *Import) MakeFileId(id int) int {
+func (el *Import) MakeFileId(id int64) int64 {
 	return id % 500000
 }
 
-func (el *Import) ExtractNodes(mapFile, dirOut string) error {
+func (el *Import) NodeFileManager(dirOut string, node *osmpbf.Node) error {
+	if strings.HasSuffix(dirOut, "/") == false {
+		dirOut += "/"
+	}
+
+	idFile := strconv.FormatInt(el.MakeFileId(node.ID), 10)
+	fileOut := dirOut + idFile + ".bin"
+	return el.AppendNodeToFile(fileOut, node.ID, node.Lon, node.Lat)
+}
+
+func (el *Import) FindNodeFileManager(dirOut string, idToFind int64) (error, float64, float64) {
+	if strings.HasSuffix(dirOut, "/") == false {
+		dirOut += "/"
+	}
+
+	idFile := strconv.FormatInt(el.MakeFileId(idToFind), 10)
+	fileOut := dirOut + idFile + ".bin"
+	return el.FindLonLatByIdInFile(fileOut, idToFind)
+}
+
+func (el *Import) FindAllNodesFrTest(mapFile, dirOut string) error {
+
+	if strings.HasSuffix(dirOut, "/") == false {
+		dirOut += "/"
+	}
+
+	var v interface{}
+
+	f, err := os.Open(mapFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	d := osmpbf.NewDecoder(f)
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return err
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+
+				err, _, _ = el.FindNodeFileManager(dirOut, v.(*osmpbf.Node).ID)
+				if err != nil {
+					return err
+				}
+
+			case *osmpbf.Way:
+				break
+
+			case *osmpbf.Relation:
+				break
+
+			}
+		}
+	}
+
+	return nil
+}
+
+func (el *Import) ExtractNodesManager(mapFile, dirOut string) error {
 
 	if strings.HasSuffix(dirOut, "/") == false {
 		dirOut += "/"
@@ -156,6 +226,7 @@ func (el *Import) ExtractNodes(mapFile, dirOut string) error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 
 	d := osmpbf.NewDecoder(f)
 	d.SetBufferSize(osmpbf.MaxBlobSize)
@@ -174,6 +245,11 @@ func (el *Import) ExtractNodes(mapFile, dirOut string) error {
 			switch v.(type) {
 
 			case *osmpbf.Node:
+
+				err = el.NodeFileManager(dirOut, v.(*osmpbf.Node))
+
+				continue
+
 				tmp.ID = v.(*osmpbf.Node).ID
 				tmp.Lat = v.(*osmpbf.Node).Lat
 				tmp.Lon = v.(*osmpbf.Node).Lon
@@ -228,11 +304,6 @@ func (el *Import) ExtractNodes(mapFile, dirOut string) error {
 
 			}
 		}
-	}
-
-	err = f.Close()
-	if err != nil {
-		return err
 	}
 
 	return nil
