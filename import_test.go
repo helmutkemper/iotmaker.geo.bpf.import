@@ -1,105 +1,57 @@
 package iotmaker_geo_pbf_import
 
-import "fmt"
+import (
+	"fmt"
+	"github.com/helmutkemper/util"
+	"os"
+)
 
 func ExampleImport_FindLonLatByIdInFile() {
 	var lat, lon float64
 	var err error
+	var latAdd float64 = 0.1234567
+	var lonAdd float64 = 0.7654321
 
 	importMap := Import{}
-	err = importMap.AppendNodeToFile("./bin", 1, 1.1, 1.2)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
+	for i := 1; i != 30000; i += 1 {
+		err = importMap.AppendLonLatToFile("./bin", int64(i), float64(i)+lonAdd, float64(i)+latAdd)
+		if err != nil {
+			fmt.Printf("err: %v\n", err)
+		}
 	}
 
-	err = importMap.AppendNodeToFile("./bin", 2, 2.1, 2.2)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
+	for i := 1; i != 30000; i += 1 {
+		err, lon, lat = importMap.FindLonLatByIdInFile("./bin", int64(i))
+		if err != nil {
+			fmt.Printf("err: %v\n", err)
+			break
+		}
+
+		lon = util.Round(lon, 0.5, 8.0)
+		lat = util.Round(lat, 0.5, 8.0)
+
+		if lon != util.Round(float64(i)+lonAdd, 0.5, 8.0) {
+			fmt.Printf("lon error: %v\n", i)
+			fmt.Printf("lon found: %v\n", lon)
+			fmt.Printf("expected lon: %v\n", util.Round(float64(i)+lonAdd, 0.5, 8.0))
+			break
+		}
+
+		if lat != util.Round(float64(i)+latAdd, 0.5, 8.0) {
+			fmt.Printf("lat error: %v\n", i)
+			fmt.Printf("lat found: %v\n", lat)
+			fmt.Printf("expected lat: %v\n", util.Round(float64(i)+latAdd, 0.5, 8.0))
+			break
+		}
 	}
 
-	err = importMap.AppendNodeToFile("./bin", 3, 3.1, 3.2)
+	err = os.Remove("./bin")
 	if err != nil {
-		fmt.Printf("err: %v\n", err)
+		fmt.Printf("error: %v\n", err.Error())
 	}
 
-	err = importMap.AppendNodeToFile("./bin", 4, 4.1, 4.2)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-
-	err = importMap.AppendNodeToFile("./bin", 5, 5.1, 5.2)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-
-	err = importMap.AppendNodeToFile("./bin", 6, 6.1, 6.2)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 1)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 2)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 3)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 4)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 5)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 6)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
-
-	err, lon, lat = importMap.FindLonLatByIdInFile("./bin", 7)
-	if err != nil {
-		fmt.Printf("err: %v\n", err)
-	}
-	fmt.Printf("lon: %v\n", lon)
-	fmt.Printf("lat: %v\n", lat)
+	fmt.Printf("end\n")
 
 	// Output:
-	// lon: 1.1
-	// lat: 1.2
-	// lon: 2.1
-	// lat: 2.2
-	// lon: 3.1
-	// lat: 3.2
-	// lon: 4.1
-	// lat: 4.2
-	// lon: 5.1
-	// lat: 5.2
-	// lon: 6.1
-	// lat: 6.2
-	// err: id not found
-	// lon: 0
-	// lat: 0
+	// end
 }

@@ -3,7 +3,6 @@ package iotmaker_geo_pbf_import
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/helmutkemper/gOsm/utilMath"
@@ -15,7 +14,6 @@ import (
 	"github.com/helmutkemper/util"
 	"go.mongodb.org/mongo-driver/bson"
 	"io"
-	"io/ioutil"
 	"os"
 	"runtime"
 	"strconv"
@@ -132,33 +130,41 @@ type ToJSonCache struct {
 }
 
 func (el *Import) MakeFileId(id int64) int64 {
-	return id % 500000
+	return id % 1000
 }
 
-func (el *Import) NodeFileManager(dirOut string, node *osmpbf.Node) error {
-	if strings.HasSuffix(dirOut, "/") == false {
-		dirOut += "/"
+func (el *Import) FileManagerAppendNodeToFile(dirFromBinaryFilesOutput string, node *osmpbf.Node) error {
+	if strings.HasSuffix(dirFromBinaryFilesOutput, "/") == false {
+		dirFromBinaryFilesOutput += "/"
 	}
 
 	idFile := strconv.FormatInt(el.MakeFileId(node.ID), 10)
-	fileOut := dirOut + idFile + ".bin"
-	return el.AppendNodeToFile(fileOut, node.ID, node.Lon, node.Lat)
+	fileOut := dirFromBinaryFilesOutput + idFile + ".bin"
+
+	return el.AppendLonLatToFile(fileOut, node.ID, node.Lon, node.Lat)
 }
 
-func (el *Import) FindNodeFileManager(dirOut string, idToFind int64) (error, float64, float64) {
-	if strings.HasSuffix(dirOut, "/") == false {
-		dirOut += "/"
+func (el *Import) FileManagerFindLonLatInFile(dirFromBinaryFilesInput string, idToFind int64) (error, float64, float64) {
+	var err error
+	var lon, lat float64
+
+	if strings.HasSuffix(dirFromBinaryFilesInput, "/") == false {
+		dirFromBinaryFilesInput += "/"
 	}
 
-	idFile := strconv.FormatInt(el.MakeFileId(idToFind), 10)
-	fileOut := dirOut + idFile + ".bin"
-	return el.FindLonLatByIdInFile(fileOut, idToFind)
+	idFileInt64 := el.MakeFileId(idToFind)
+	idFileStr := strconv.FormatInt(idFileInt64, 10)
+	fileOut := dirFromBinaryFilesInput + idFileStr + ".bin"
+
+	err, lon, lat = el.FindLonLatByIdInFile(fileOut, idToFind)
+
+	return err, lon, lat
 }
 
-func (el *Import) FindAllNodesFrTest(mapFile, dirOut string) error {
+func (el *Import) FindAllNodesForTest(mapFile, dirFromBinaryFilesInput string) error {
 
-	if strings.HasSuffix(dirOut, "/") == false {
-		dirOut += "/"
+	if strings.HasSuffix(dirFromBinaryFilesInput, "/") == false {
+		dirFromBinaryFilesInput += "/"
 	}
 
 	var v interface{}
@@ -187,7 +193,7 @@ func (el *Import) FindAllNodesFrTest(mapFile, dirOut string) error {
 
 			case *osmpbf.Node:
 
-				err, _, _ = el.FindNodeFileManager(dirOut, v.(*osmpbf.Node).ID)
+				err, _, _ = el.FileManagerFindLonLatInFile(dirFromBinaryFilesInput, v.(*osmpbf.Node).ID)
 				if err != nil {
 					return err
 				}
@@ -205,18 +211,13 @@ func (el *Import) FindAllNodesFrTest(mapFile, dirOut string) error {
 	return nil
 }
 
-func (el *Import) ExtractNodesManager(mapFile, dirOut string) error {
+func (el *Import) FileManagerExtractNodesToBinaryFilesDir(mapFile, dirFromBinaryFilesOutput string) error {
 
-	if strings.HasSuffix(dirOut, "/") == false {
-		dirOut += "/"
+	if strings.HasSuffix(dirFromBinaryFilesOutput, "/") == false {
+		dirFromBinaryFilesOutput += "/"
 	}
 
 	var v interface{}
-	var JSonOut []byte
-	var tmp ToJSonCache
-	var nodesFound = 0
-	var nodesIgnored = 0
-	var nodesProcessed = 0
 
 	el.nodesFound = make(chan int, 1)
 	el.nodesIgnored = make(chan int, 1)
@@ -246,61 +247,17 @@ func (el *Import) ExtractNodesManager(mapFile, dirOut string) error {
 
 			case *osmpbf.Node:
 
-				err = el.NodeFileManager(dirOut, v.(*osmpbf.Node))
-
+				err = el.FileManagerAppendNodeToFile(dirFromBinaryFilesOutput, v.(*osmpbf.Node))
+				if err != nil {
+					return err
+				}
 				continue
 
-				tmp.ID = v.(*osmpbf.Node).ID
-				tmp.Lat = v.(*osmpbf.Node).Lat
-				tmp.Lon = v.(*osmpbf.Node).Lon
-
-				idSting := strconv.FormatInt(tmp.ID, 10)
-				filePath := dirOut + idSting + ".json"
-
-				// todo: make a function - start
-				nodesFound += 1
-				if cap(el.nodesFound) == 0 {
-					<-el.nodesFound
-				}
-				el.nodesFound <- nodesFound
-				// todo: make a function - end
-
-				if util.CheckFileExists(filePath) == true {
-
-					// todo: make a function - start
-					nodesIgnored += 1
-					if cap(el.nodesIgnored) == 0 {
-						<-el.nodesIgnored
-					}
-					el.nodesIgnored <- nodesIgnored
-					// todo: make a function - end
-
-					continue
-				}
-
-				// todo: make a function - start
-				nodesProcessed += 1
-				if cap(el.nodesProcessed) == 0 {
-					<-el.nodesProcessed
-				}
-				el.nodesProcessed <- nodesProcessed
-				// todo: make a function - end
-
-				JSonOut, err = json.Marshal(tmp)
-				if err != nil {
-					return err
-				}
-
-				err = ioutil.WriteFile(filePath, JSonOut, 0644)
-				if err != nil {
-					return err
-				}
-
 			case *osmpbf.Way:
-				break
+				return nil
 
 			case *osmpbf.Relation:
-				break
+				return nil
 
 			}
 		}
@@ -309,7 +266,7 @@ func (el *Import) ExtractNodesManager(mapFile, dirOut string) error {
 	return nil
 }
 
-func (el *Import) ProcessWays(db iotmaker_db_interface.DbFunctionsInterface, mapFile, tmpFile string) {
+func (el *Import) DbManagerProcessWaysAndPutIntoDb(db iotmaker_db_interface.DbFunctionsInterface, mapFile, dirFromBinaryFilesInput string) {
 
 	var v interface{}
 	var totalFromQuery int64
@@ -358,8 +315,8 @@ func (el *Import) ProcessWays(db iotmaker_db_interface.DbFunctionsInterface, map
 				}
 
 				if waysInteractionCount >= configNodesPerInteraction {
-					process(tmpFile)
-					populate(db, tmpFile)
+					process(dirFromBinaryFilesInput)
+					populate(db, dirFromBinaryFilesInput)
 					waysListLineCount = 0
 					waysInteractionCount = 0
 				}
@@ -403,8 +360,8 @@ func (el *Import) ProcessWays(db iotmaker_db_interface.DbFunctionsInterface, map
 
 				if waysInteractionCount != 0 {
 					waysInteractionCount = 0
-					process(tmpFile)
-					populate(db, tmpFile)
+					process(dirFromBinaryFilesInput)
+					populate(db, dirFromBinaryFilesInput)
 				}
 
 			default:
@@ -419,7 +376,7 @@ func (el *Import) ProcessWays(db iotmaker_db_interface.DbFunctionsInterface, map
 	}
 }
 
-func (el *Import) AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
+func (el *Import) AppendLonLatToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
 
 	if idIn == 0 || (lonIn == 0.0 && latIn == 0.0) {
 		return errors.New("zero as value")
@@ -480,7 +437,7 @@ func (el *Import) FindLonLatByIdInFile(inputFile string, idToFind int64) (error,
 
 	var idInt64 int64
 	var lonFloat64, latFloat64 float64
-
+	//tem que abrir o bin
 	nodesFile, err := os.OpenFile(inputFile, os.O_RDONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return err, 0.0, 0.0
@@ -754,12 +711,12 @@ func deleteTagsUnnecessary(tag *map[string]string) {
 func AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
 
 	if idIn == 0 || (lonIn == 0.0 && latIn == 0.0) {
-		_ = log.Errorf("AppendNodeToFile.values.error: zero as value")
+		_ = log.Errorf("AppendLonLatToFile.values.error: zero as value")
 	}
 
 	nodesFile, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.os.OpenFile.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.os.OpenFile.error: %v", err.Error())
 		return err
 	}
 	defer nodesFile.Close()
@@ -771,13 +728,13 @@ func AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error
 
 	err = binary.Write(bufWriter, binary.BigEndian, idIn)
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.binary.Write.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.binary.Write.error: %v", err.Error())
 		return err
 	}
 
 	_, err = nodesFile.Write(bufWriter.Bytes())
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.nodesFile.Write.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.nodesFile.Write.error: %v", err.Error())
 		return err
 	}
 
@@ -785,13 +742,13 @@ func AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error
 
 	err = binary.Write(bufWriter, binary.BigEndian, lonIn)
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.binary.Write.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.binary.Write.error: %v", err.Error())
 		return err
 	}
 
 	_, err = nodesFile.Write(bufWriter.Bytes())
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.nodesFile.Write.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.nodesFile.Write.error: %v", err.Error())
 		return err
 	}
 
@@ -799,12 +756,12 @@ func AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error
 
 	err = binary.Write(bufWriter, binary.BigEndian, latIn)
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.binary.Write.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.binary.Write.error: %v", err.Error())
 		return err
 	}
 	_, err = nodesFile.Write(bufWriter.Bytes())
 	if err != nil {
-		_ = log.Errorf("AppendNodeToFile.nodesFile.Write.error: %v", err.Error())
+		_ = log.Errorf("AppendLonLatToFile.nodesFile.Write.error: %v", err.Error())
 		return err
 	}
 
@@ -923,7 +880,7 @@ func populate(db iotmaker_db_interface.DbFunctionsInterface, inputFile string) {
 
 					err = AppendNodeToFile(inputFile, coordinateFromServer.Id, coordinateFromServer.Lon, coordinateFromServer.Lat)
 					if err != nil {
-						_ = log.Errorf("gosmImport.populate.AppendNodeToFile.error: %v", err)
+						_ = log.Errorf("gosmImport.populate.AppendLonLatToFile.error: %v", err)
 						continue
 					}
 
