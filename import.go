@@ -4,15 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"fmt"
-	"github.com/helmutkemper/gOsm/utilMath"
-	"github.com/helmutkemper/go-radix"
-	iotmaker_db_interface "github.com/helmutkemper/iotmaker.db.interface"
-	iotmaker_geo_osm "github.com/helmutkemper/iotmaker.geo.osm"
 	"github.com/helmutkemper/osmpbf"
-	log "github.com/helmutkemper/seelog"
 	"github.com/helmutkemper/util"
-	"go.mongodb.org/mongo-driver/bson"
 	"io"
 	"os"
 	"runtime"
@@ -21,81 +14,134 @@ import (
 )
 
 type Import struct {
-	nodesCount     int
-	waysCount      int
-	relationsCount int
-	othersCount    int
+	nodesCount     int64
+	waysCount      int64
+	relationsCount int64
+	othersCount    int64
 
-	nodesFound     chan int
-	nodesIgnored   chan int
-	nodesProcessed chan int
+	nodesFound     chan int64
+	nodesIgnored   chan int64
+	nodesProcessed chan int64
+
+	mapFile            string
+	dirFromBinaryFiles string
+
+	unnecessaryTags map[string]string
 }
 
-type wayError struct {
-	Id        int64
-	Processed bool
+func (el *Import) SetMapFilePath(path string) error {
+	if !util.CheckFileOrDirExists(path) {
+		return errors.New("map file not found")
+	}
+
+	el.mapFile = path
+	return nil
 }
 
-type wayConverted struct {
-	ID   int64
-	Node [][2]float64
-	Tags map[string]string
-	Info osmpbf.Info
+func (el *Import) SetDirFromBinaryFilesCache(path string) error {
+	if strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+
+	if !util.CheckFileOrDirExists(path) {
+		return errors.New("binary dir not found")
+	}
+
+	el.dirFromBinaryFiles = path
+	return nil
 }
 
-var (
-	configSkipExistentData    = false
-	configNodesPerInteraction = 100
-	nodesSearchCount          = 0
+// en: Checks to see if the file maps and the directory of the binary files exists
+//
+// pt_br: Verifica se o arquivo de mapas e o diretório dos arquivos binários existem
+func (el *Import) Verify() error {
+	if el.mapFile == "" {
+		return errors.New("please, set a map file path first")
+	}
 
-	nodesProcessMapGlobalTotal = 0
+	if el.dirFromBinaryFiles == "" {
+		return errors.New("please, set a dir from a binary files cache first")
+	}
 
-	waysInteractionCount = 0
-	waysListLineCount    = 0
-	waysCount            = 0
-
-	notFoundCount = 0
-
-	radixTreeWays *radix.Tree
-
-	waysListProcessed = make([]iotmaker_geo_osm.WayStt, configNodesPerInteraction)
-	waysList          = make([]osmpbf.Way, configNodesPerInteraction)
-)
-
-type NodeDb struct {
-	Index string
-	Loc   [2]float64
+	return nil
 }
 
-type Way struct {
-	ID      int64
-	Tags    map[string]string
-	NodeIDs []int64
-	Info    osmpbf.Info
+func (el *Import) TagToDeleteAddKeyToDelete(key string) {
+	if len(el.unnecessaryTags) == 0 {
+		el.unnecessaryTags = make(map[string]string)
+	}
+
+	el.unnecessaryTags[key] = ""
 }
 
-func (el *Import) CountElements(mapFile string) (error, int, int, int, int) {
+func (el *Import) TagToDeleteAddKeyValueToDelete(key, value string) {
+	if len(el.unnecessaryTags) == 0 {
+		el.unnecessaryTags = make(map[string]string)
+	}
+
+	el.unnecessaryTags[key] = value
+}
+
+func (el *Import) deleteUnnecessaryTags(tag *map[string]string) {
+	delete(*tag, "source")
+	delete(*tag, "history")
+	delete(*tag, "converted_by")
+	delete(*tag, "created_by")
+	delete(*tag, "wikipedia")
+
+	if len(el.unnecessaryTags) == 0 {
+
+		for tagInListKey, tagInListValue := range el.unnecessaryTags {
+
+			if tagInListValue == "" {
+				delete(*tag, tagInListKey)
+
+			} else {
+
+				for tagInWayKey, tagInWayValue := range *tag {
+					if tagInWayKey == tagInListKey && tagInWayValue == tagInListValue {
+						delete(*tag, tagInListKey)
+						break
+
+					}
+				}
+			}
+
+		}
+	}
+}
+
+func (el *Import) CountElements() error {
+	var err error
+
+	err = el.Verify()
+	if err != nil {
+		return err
+	}
 
 	var v interface{}
+	var f *os.File
 
-	f, err := os.Open(mapFile)
+	f, err = os.Open(el.mapFile)
 	if err != nil {
-		return err, 0, 0, 0, 0
+		return err
 	}
 
 	d := osmpbf.NewDecoder(f)
 	d.SetBufferSize(osmpbf.MaxBlobSize)
 	err = d.Start(runtime.GOMAXPROCS(-1))
 	if err != nil {
-		return err, 0, 0, 0, 0
+		return err
 	}
 
 	for {
 
 		if v, err = d.Decode(); err == io.EOF {
 			break
+
 		} else if err != nil {
-			return err, 0, 0, 0, 0
+			return err
+
 		} else {
 			switch v.(type) {
 
@@ -117,59 +163,132 @@ func (el *Import) CountElements(mapFile string) (error, int, int, int, int) {
 
 	err = f.Close()
 	if err != nil {
-		return err, el.nodesCount, el.waysCount, el.relationsCount, el.othersCount
+		return err
 	}
 
-	return nil, el.nodesCount, el.waysCount, el.relationsCount, el.othersCount
+	return nil
 }
 
-type ToJSonCache struct {
-	ID  int64
-	Lat float64
-	Lon float64
+func (el *Import) MakeFileId(id, moduleValue int64) int64 {
+	return id % moduleValue
 }
 
-func (el *Import) MakeFileId(id int64) int64 {
-	return id % 1000
+func (el *Import) AppendNodeToFile(node *osmpbf.Node) error {
+	return el.AppendLonLatToFile(node.ID, node.Lon, node.Lat)
 }
 
-func (el *Import) FileManagerAppendNodeToFile(dirFromBinaryFilesOutput string, node *osmpbf.Node) error {
-	if strings.HasSuffix(dirFromBinaryFilesOutput, "/") == false {
-		dirFromBinaryFilesOutput += "/"
-	}
-
-	idFile := strconv.FormatInt(el.MakeFileId(node.ID), 10)
-	fileOut := dirFromBinaryFilesOutput + idFile + ".bin"
-
-	return el.AppendLonLatToFile(fileOut, node.ID, node.Lon, node.Lat)
-}
-
-func (el *Import) FileManagerFindLonLatInFile(dirFromBinaryFilesInput string, idToFind int64) (error, float64, float64) {
+func (el *Import) FileManagerFindLonLatInFile(idToFind int64) (error, float64, float64) {
 	var err error
 	var lon, lat float64
 
-	if strings.HasSuffix(dirFromBinaryFilesInput, "/") == false {
-		dirFromBinaryFilesInput += "/"
-	}
-
-	idFileInt64 := el.MakeFileId(idToFind)
-	idFileStr := strconv.FormatInt(idFileInt64, 10)
-	fileOut := dirFromBinaryFilesInput + idFileStr + ".bin"
-
-	err, lon, lat = el.FindLonLatByIdInFile(fileOut, idToFind)
-
+	err, lon, lat = el.FindLonLatByIdInFile(idToFind)
 	return err, lon, lat
 }
 
-func (el *Import) FindAllNodesForTest(mapFile, dirFromBinaryFilesInput string) error {
+func (el *Import) findAndInsertWaysLonAndLat(nodesIds *[]int64, wayOut *WayConverted) error {
+	var err error
+	var lon, lat float64
 
-	if strings.HasSuffix(dirFromBinaryFilesInput, "/") == false {
-		dirFromBinaryFilesInput += "/"
+	for _, idNode := range *nodesIds {
+		err, lon, lat = el.FileManagerFindLonLatInFile(idNode)
+		if err != nil {
+			return err
+		}
+
+		wayOut.AddLonLat(lon, lat)
+	}
+
+	return nil
+}
+
+func (el *Import) PopulateWay(way *osmpbf.Way) (error, *WayConverted) {
+	var err error
+	var ret = NewWayConverted()
+
+	el.deleteUnnecessaryTags(&way.Tags)
+	err = el.findAndInsertWaysLonAndLat(&way.NodeIDs, ret)
+	if err != nil {
+		return err, nil
+	}
+
+	ret.CopyTags(&way.Tags)
+	ret.AddInfo(&way.Info)
+	ret.ID = way.ID
+
+	return nil, ret
+}
+
+func (el *Import) FindAllNodesForTest() error {
+	var err error
+
+	err = el.Verify()
+	if err != nil {
+		return err
 	}
 
 	var v interface{}
+	var f *os.File
 
-	f, err := os.Open(mapFile)
+	f, err = os.Open(el.mapFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	d := osmpbf.NewDecoder(f)
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return err
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+
+		} else if err != nil {
+			return err
+
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+
+				err, _, _ = el.FileManagerFindLonLatInFile(v.(*osmpbf.Node).ID)
+				if err != nil {
+					return err
+				}
+
+			case *osmpbf.Way:
+				break
+
+			case *osmpbf.Relation:
+				break
+
+			}
+		}
+	}
+
+	return nil
+}
+
+func (el *Import) ExtractNodesToBinaryFilesDir() error {
+	var err error
+
+	err = el.Verify()
+	if err != nil {
+		return err
+	}
+
+	var v interface{}
+	var f *os.File
+
+	el.nodesFound = make(chan int64, 1)
+	el.nodesIgnored = make(chan int64, 1)
+	el.nodesProcessed = make(chan int64, 1)
+
+	f, err = os.Open(el.mapFile)
 	if err != nil {
 		return err
 	}
@@ -193,16 +312,17 @@ func (el *Import) FindAllNodesForTest(mapFile, dirFromBinaryFilesInput string) e
 
 			case *osmpbf.Node:
 
-				err, _, _ = el.FileManagerFindLonLatInFile(dirFromBinaryFilesInput, v.(*osmpbf.Node).ID)
+				err = el.AppendNodeToFile(v.(*osmpbf.Node))
 				if err != nil {
 					return err
 				}
+				continue
 
 			case *osmpbf.Way:
-				break
+				return nil
 
 			case *osmpbf.Relation:
-				break
+				return nil
 
 			}
 		}
@@ -211,19 +331,23 @@ func (el *Import) FindAllNodesForTest(mapFile, dirFromBinaryFilesInput string) e
 	return nil
 }
 
-func (el *Import) FileManagerExtractNodesToBinaryFilesDir(mapFile, dirFromBinaryFilesOutput string) error {
+func (el *Import) ProcessWaysFromMapFile(externalFunction func(wayConverted WayConverted)) error {
+	var err error
 
-	if strings.HasSuffix(dirFromBinaryFilesOutput, "/") == false {
-		dirFromBinaryFilesOutput += "/"
+	err = el.Verify()
+	if err != nil {
+		return err
+	}
+
+	if externalFunction == nil {
+		return errors.New("please, set a external function to process all ways")
 	}
 
 	var v interface{}
+	var f *os.File
+	var wayConverted *WayConverted
 
-	el.nodesFound = make(chan int, 1)
-	el.nodesIgnored = make(chan int, 1)
-	el.nodesProcessed = make(chan int, 1)
-
-	f, err := os.Open(mapFile)
+	f, err = os.Open(el.mapFile)
 	if err != nil {
 		return err
 	}
@@ -240,21 +364,20 @@ func (el *Import) FileManagerExtractNodesToBinaryFilesDir(mapFile, dirFromBinary
 
 		if v, err = d.Decode(); err == io.EOF {
 			break
+
 		} else if err != nil {
 			return err
+
 		} else {
 			switch v.(type) {
 
 			case *osmpbf.Node:
-
-				err = el.FileManagerAppendNodeToFile(dirFromBinaryFilesOutput, v.(*osmpbf.Node))
-				if err != nil {
-					return err
-				}
 				continue
 
 			case *osmpbf.Way:
-				return nil
+
+				err, wayConverted = el.PopulateWay(v.(*osmpbf.Way))
+				externalFunction(*wayConverted)
 
 			case *osmpbf.Relation:
 				return nil
@@ -266,123 +389,26 @@ func (el *Import) FileManagerExtractNodesToBinaryFilesDir(mapFile, dirFromBinary
 	return nil
 }
 
-func (el *Import) DbManagerProcessWaysAndPutIntoDb(db iotmaker_db_interface.DbFunctionsInterface, mapFile, dirFromBinaryFilesInput string) {
-
-	var v interface{}
-	var totalFromQuery int64
-
-	f, err := os.Open(mapFile)
-	if err != nil {
-		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.os.Open.error: %v", err)
-	}
-
-	d := osmpbf.NewDecoder(f)
-
-	// use more memory from the start, it is faster
-	d.SetBufferSize(osmpbf.MaxBlobSize)
-
-	// start decoding with several goroutines, it is faster
-	err = d.Start(runtime.GOMAXPROCS(-1))
-	if err != nil {
-		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.d.Start.error: %v", err)
-	}
-
-	for {
-
-		if v, err = d.Decode(); err == io.EOF {
-			break
-		} else if err != nil {
-			_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.d.Decode.error: %v", err)
-		} else {
-			switch v.(type) {
-
-			case *osmpbf.Node:
-				continue
-
-			case *osmpbf.Way:
-
-				way := v.(*osmpbf.Way)
-
-				if configSkipExistentData == true {
-					err, totalFromQuery = db.Count("way", bson.M{"id": v.(*osmpbf.Way).ID})
-					if err != nil {
-						_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.db.way.count.error: %v", err)
-					}
-
-					if totalFromQuery != 0 {
-						continue
-					}
-				}
-
-				if waysInteractionCount >= configNodesPerInteraction {
-					process(dirFromBinaryFilesInput)
-					populate(db, dirFromBinaryFilesInput)
-					waysListLineCount = 0
-					waysInteractionCount = 0
-				}
-
-				if waysInteractionCount == 0 {
-					nodesSearchCount = 0
-					radixTreeWays = radix.New()
-				}
-
-				waysList[waysListLineCount] = *way
-				waysListProcessed[waysListLineCount] = iotmaker_geo_osm.WayStt{
-					Id:        way.ID,
-					Loc:       make([][2]float64, len(way.NodeIDs)),
-					Rad:       make([][2]float64, len(way.NodeIDs)),
-					Tag:       way.Tags,
-					Data:      make(map[string]string),
-					UId:       int64(way.Info.Uid),
-					ChangeSet: way.Info.Changeset,
-					User:      way.Info.User,
-					TimeStamp: way.Info.Timestamp,
-					Version:   int64(way.Info.Version),
-					Visible:   way.Info.Visible,
-				}
-
-				for _, idNode := range way.NodeIDs {
-					nodesSearchCount += 1
-					idNodeString := strconv.FormatInt(idNode, 10)
-					_, found := radixTreeWays.Get(idNodeString)
-					if found == false {
-						radixTreeWays.Insert(idNodeString, [2]float64{0.0, 0.0})
-					}
-				}
-
-				waysCount += 1
-				waysListLineCount += 1
-				waysInteractionCount += 1
-
-			case *osmpbf.Relation:
-
-				//relation := v.(*osmpbf.Relation)
-
-				if waysInteractionCount != 0 {
-					waysInteractionCount = 0
-					process(dirFromBinaryFilesInput)
-					populate(db, dirFromBinaryFilesInput)
-				}
-
-			default:
-				_ = log.Error("unknown type %T\n", v)
-			}
-		}
-	}
-
-	err = f.Close()
-	if err != nil {
-		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.f.close.error: %v", err)
-	}
-}
-
-func (el *Import) AppendLonLatToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
+func (el *Import) AppendLonLatToFile(idIn int64, lonIn, latIn float64) error {
+	var err error
+	var nodesFile *os.File
+	var fileIn string
 
 	if idIn == 0 || (lonIn == 0.0 && latIn == 0.0) {
 		return errors.New("zero as value")
 	}
 
-	nodesFile, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	err, fileIn = el.applyRuleToBinaryFile(idIn)
+	if err != nil {
+		return err
+	}
+
+	err, _, _ = el.FindLonLatByIdInFile(idIn)
+	if err == nil {
+		return nil
+	}
+
+	nodesFile, err = os.OpenFile(fileIn, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
@@ -429,7 +455,26 @@ func (el *Import) AppendLonLatToFile(outputFile string, idIn int64, lonIn, latIn
 	return nil
 }
 
-func (el *Import) FindLonLatByIdInFile(inputFile string, idToFind int64) (error, float64, float64) {
+func (el *Import) applyRuleToBinaryFile(id int64) (error, string) {
+	var err error
+
+	err = el.Verify()
+	if err != nil {
+		return err, ""
+	}
+
+	idFileInt64 := el.MakeFileId(id, 1000)
+	idFileStr := strconv.FormatInt(idFileInt64, 10)
+	filePath := el.dirFromBinaryFiles + idFileStr + ".bin"
+
+	return nil, filePath
+}
+
+func (el *Import) FindLonLatByIdInFile(idToFind int64) (error, float64, float64) {
+	var err error
+	var nodesFile *os.File
+	var fileIn string
+
 	bufReader := &bytes.Reader{}
 
 	idByte := make([]byte, 8)
@@ -437,8 +482,13 @@ func (el *Import) FindLonLatByIdInFile(inputFile string, idToFind int64) (error,
 
 	var idInt64 int64
 	var lonFloat64, latFloat64 float64
-	//tem que abrir o bin
-	nodesFile, err := os.OpenFile(inputFile, os.O_RDONLY|os.O_CREATE, 0600)
+
+	err, fileIn = el.applyRuleToBinaryFile(idToFind)
+	if err != nil {
+		return err, 0.0, 0.0
+	}
+
+	nodesFile, err = os.OpenFile(fileIn, os.O_RDONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return err, 0.0, 0.0
 	}
@@ -503,473 +553,87 @@ func (el *Import) FindLonLatByIdInFile(inputFile string, idToFind int64) (error,
 	return errors.New("id not found"), 0.0, 0.0
 }
 
-func ProcessPbfFileInMemory(db iotmaker_db_interface.DbFunctionsInterface, mapFile, tmpFile string) {
+type WayConverted struct {
+	ID   int64
+	Node [][2]float64
+	Tags map[string]string
+	Info osmpbf.Info
+}
 
-	var v interface{}
-	var totalFromQuery int64
+func (el *WayConverted) AddLonLat(lon, lat float64) {
+	el.Node = append(el.Node, [2]float64{lon, lat})
+}
 
-	f, err := os.Open(mapFile)
-	if err != nil {
-		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.os.Open.error: %v", err)
+func (el *WayConverted) AddTag(key, value string) {
+	if len(el.Tags) == 0 {
+		el.Tags = make(map[string]string)
 	}
+	el.Tags[key] = value
+}
 
-	d := osmpbf.NewDecoder(f)
+func (el *WayConverted) AddInfo(info *osmpbf.Info) {
+	el.Info.Changeset = info.Changeset
+	el.Info.Timestamp = info.Timestamp
+	el.Info.Uid = info.Uid
+	el.Info.Version = info.Version
+	el.Info.Visible = info.Visible
+}
 
-	// use more memory from the start, it is faster
-	d.SetBufferSize(osmpbf.MaxBlobSize)
+func (el *WayConverted) CopyTags(originalList *map[string]string) {
+	el.Tags = make(map[string]string)
 
-	// start decoding with several goroutines, it is faster
-	err = d.Start(runtime.GOMAXPROCS(-1))
-	if err != nil {
-		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.d.Start.error: %v", err)
-	}
-
-	for {
-
-		if v, err = d.Decode(); err == io.EOF {
-			break
-		} else if err != nil {
-			_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.d.Decode.error: %v", err)
-		} else {
-			switch v.(type) {
-
-			case *osmpbf.Node:
-				continue
-				node := v.(*osmpbf.Node)
-
-				if TestTagNodeToDiscard(&node.Tags) == true {
-					continue
-				}
-
-				if configSkipExistentData == true {
-					err, totalFromQuery = db.Count("point", bson.M{"id": v.(*osmpbf.Node).ID})
-					if err != nil {
-						_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.db.point.count.error: %v", err)
-					}
-
-					if totalFromQuery != 0 {
-						continue
-					}
-				}
-
-				point := iotmaker_geo_osm.PointStt{}
-				err = point.SetLngLatDegrees(node.Lon, node.Lat)
-				if err != nil {
-					_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.SetLngLatDegrees.error: %v", err)
-				}
-				point.Tag = node.Tags
-				point.UId = int64(node.Info.Uid)
-				point.ChangeSet = node.Info.Changeset
-				point.User = node.Info.User
-				point.TimeStamp = node.Info.Timestamp
-				point.Version = int64(node.Info.Version)
-				point.Visible = node.Info.Visible
-				point.Id = node.ID
-				point.MakeGeoJSonFeature()
-				err, _ = point.MakeMD5()
-				if err != nil {
-					_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.MakeMD5.error: %v", err)
-				}
-
-				err = db.Insert("point", point)
-				if err != nil {
-					_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.insert.error: %v", err)
-				}
-
-			case *osmpbf.Way:
-
-				way := v.(*osmpbf.Way)
-
-				if configSkipExistentData == true {
-					err, totalFromQuery = db.Count("way", bson.M{"id": v.(*osmpbf.Way).ID})
-					if err != nil {
-						_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.db.way.count.error: %v", err)
-					}
-
-					if totalFromQuery != 0 {
-						continue
-					}
-				}
-
-				if waysInteractionCount >= configNodesPerInteraction {
-					process(tmpFile)
-					populate(db, tmpFile)
-					waysListLineCount = 0
-					waysInteractionCount = 0
-				}
-
-				if waysInteractionCount == 0 {
-					nodesSearchCount = 0
-					radixTreeWays = radix.New()
-				}
-
-				waysList[waysListLineCount] = *way
-				waysListProcessed[waysListLineCount] = iotmaker_geo_osm.WayStt{
-					Id:        way.ID,
-					Loc:       make([][2]float64, len(way.NodeIDs)),
-					Rad:       make([][2]float64, len(way.NodeIDs)),
-					Tag:       way.Tags,
-					Data:      make(map[string]string),
-					UId:       int64(way.Info.Uid),
-					ChangeSet: way.Info.Changeset,
-					User:      way.Info.User,
-					TimeStamp: way.Info.Timestamp,
-					Version:   int64(way.Info.Version),
-					Visible:   way.Info.Visible,
-				}
-
-				for _, idNode := range way.NodeIDs {
-					nodesSearchCount += 1
-					idNodeString := strconv.FormatInt(idNode, 10)
-					_, found := radixTreeWays.Get(idNodeString)
-					if found == false {
-						radixTreeWays.Insert(idNodeString, [2]float64{0.0, 0.0})
-					}
-				}
-
-				waysCount += 1
-				waysListLineCount += 1
-				waysInteractionCount += 1
-
-			case *osmpbf.Relation:
-
-				//relation := v.(*osmpbf.Relation)
-
-				if waysInteractionCount != 0 {
-					waysInteractionCount = 0
-					process(tmpFile)
-					populate(db, tmpFile)
-				}
-
-			default:
-				_ = log.Error("unknown type %T\n", v)
-			}
-		}
-	}
-
-	err = f.Close()
-	if err != nil {
-		_ = log.Errorf("gosmImport.ProcessPbfFileInMemory.f.close.error: %v", err)
+	for key, value := range *originalList {
+		el.Tags[key] = value
 	}
 }
 
-func TestTagNodeToDiscard(tag *map[string]string) bool {
+func NewWayConverted() *WayConverted {
+	newWay := WayConverted{}
+	newWay.Node = make([][2]float64, 0)
+	newWay.Tags = make(map[string]string)
+	newWay.Info = osmpbf.Info{}
 
-	deleteTagsUnnecessary(tag)
-
-	length := len(*tag)
-	count := 0
-
-	for k := range *tag {
-		switch k {
-		case "building":
-			count += 1
-		}
-	}
-
-	if length == count {
-		return true
-	}
-
-	if len(*tag) == 0 {
-		return true
-	}
-
-	return false
+	return &newWay
 }
 
-func deleteTagsUnnecessary(tag *map[string]string) {
-	delete(*tag, "source")
-	delete(*tag, "history")
-	delete(*tag, "converted_by")
-	delete(*tag, "created_by")
-	delete(*tag, "wikipedia")
-
-	return
-	// fixme: pode ser que isto seja necessários em alguns projetos - início
-	delete(*tag, "noexit")
-	delete(*tag, "barrier")
-	t := *tag
-	if t["highway"] == "crossing" {
-		delete(*tag, "highway")
-	}
-	if t["crossing"] == "marked" {
-		delete(*tag, "crossing")
-	}
-	if t["highway"] == "motorway_junction" {
-		delete(*tag, "highway")
-	}
+type wayError struct {
+	Id        int64
+	Processed bool
 }
 
-// pt_br: Adiciona osm.id, longitude e latitude em um arquivo binário, afim de fazer
-// uma busca em memória mais rápida do que em banco de dados.
-//
-// O maior problema da importação de arquivos é o excesso de pontos usados para
-// formar todos os outros tipos de dados.
-// Eles fazem bancos como o mongoDB ficarem muitos lentos a medidas que um volume
-// muito grande de dados é inserido.
-func AppendNodeToFile(outputFile string, idIn int64, lonIn, latIn float64) error {
+var (
+//configSkipExistentData    = false
+//configNodesPerInteraction = 100
+//nodesSearchCount          = 0
 
-	if idIn == 0 || (lonIn == 0.0 && latIn == 0.0) {
-		_ = log.Errorf("AppendLonLatToFile.values.error: zero as value")
-	}
+//nodesProcessMapGlobalTotal = 0
 
-	nodesFile, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.os.OpenFile.error: %v", err.Error())
-		return err
-	}
-	defer nodesFile.Close()
+//waysInteractionCount = 0
+//waysListLineCount    = 0
+//waysCount            = 0
 
-	bufWriter := new(bytes.Buffer)
+//notFoundCount = 0
 
-	lonIn = util.Round(lonIn, 0.5, 8.0)
-	latIn = util.Round(latIn, 0.5, 8.0)
+//radixTreeWays *radix.Tree
 
-	err = binary.Write(bufWriter, binary.BigEndian, idIn)
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.binary.Write.error: %v", err.Error())
-		return err
-	}
+//waysListProcessed = make([]iotmaker_geo_osm.WayStt, configNodesPerInteraction)
+//waysList          = make([]osmpbf.Way, configNodesPerInteraction)
+)
 
-	_, err = nodesFile.Write(bufWriter.Bytes())
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.nodesFile.Write.error: %v", err.Error())
-		return err
-	}
-
-	bufWriter = new(bytes.Buffer)
-
-	err = binary.Write(bufWriter, binary.BigEndian, lonIn)
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.binary.Write.error: %v", err.Error())
-		return err
-	}
-
-	_, err = nodesFile.Write(bufWriter.Bytes())
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.nodesFile.Write.error: %v", err.Error())
-		return err
-	}
-
-	bufWriter = new(bytes.Buffer)
-
-	err = binary.Write(bufWriter, binary.BigEndian, latIn)
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.binary.Write.error: %v", err.Error())
-		return err
-	}
-	_, err = nodesFile.Write(bufWriter.Bytes())
-	if err != nil {
-		_ = log.Errorf("AppendLonLatToFile.nodesFile.Write.error: %v", err.Error())
-		return err
-	}
-
-	return nil
+type _NodeDb struct {
+	Index string
+	Loc   [2]float64
 }
 
-func process(inputFile string) {
-	bufReader := &bytes.Reader{}
-
-	idByte := make([]byte, 8)
-	float64Byte := make([]byte, 8)
-
-	var idInt64 int64
-	var lonFloat64, latFloat64 float64
-
-	nodesFile, err := os.OpenFile(inputFile, os.O_RDONLY|os.O_CREATE, 0600)
-	if err != nil {
-		_ = log.Errorf("gosmImport.process.os.OpenFile.error: %v", err)
-	}
-
-	var filePointer int64 = 0
-
-	for {
-		nodesProcessMapGlobalTotal += 1
-
-		// read node id
-		_, err = nodesFile.ReadAt(idByte, filePointer)
-		if err == io.EOF {
-			nodesFile.Close()
-			break
-		}
-
-		filePointer += 8
-
-		bufReader = bytes.NewReader(idByte)
-		err = binary.Read(bufReader, binary.BigEndian, &idInt64)
-		if err != nil {
-			_ = log.Errorf("gosmImport.process.bytes.NewReader.error: %v", err)
-		}
-
-		// read node lon
-		_, err = nodesFile.ReadAt(float64Byte, filePointer)
-		if err != nil {
-			_ = log.Errorf("gosmImport.process.nodesFile.ReadAt.error: %v", err)
-		}
-
-		filePointer += 8
-
-		bufReader = bytes.NewReader(float64Byte)
-		err = binary.Read(bufReader, binary.BigEndian, &lonFloat64)
-		if err != nil {
-			_ = log.Errorf("gosmImport.process.bytes.NewReader.error: %v", err)
-		}
-
-		// read node lat
-		_, err = nodesFile.ReadAt(float64Byte, filePointer)
-		if err != nil {
-			_ = log.Errorf("gosmImport.process.nodesFile.ReadAt.error: %v", err)
-		}
-
-		filePointer += 8
-
-		bufReader = bytes.NewReader(float64Byte)
-		err = binary.Read(bufReader, binary.BigEndian, &latFloat64)
-		if err != nil {
-			_ = log.Errorf("gosmImport.process.bytes.NewReader.error: %v", err)
-		}
-
-		idNodeString := strconv.FormatInt(idInt64, 10)
-		_, found := radixTreeWays.Get(idNodeString)
-		if found == true {
-			radixTreeWays.Insert(idNodeString, [2]float64{lonFloat64, latFloat64})
-		}
-	}
-
-	nodesFile.Close()
-
-	nodesProcessMapGlobalTotal = 0
+type _Way struct {
+	ID      int64
+	Tags    map[string]string
+	NodeIDs []int64
+	Info    osmpbf.Info
 }
 
-func populate(db iotmaker_db_interface.DbFunctionsInterface, inputFile string) {
-
-	for i := 0; i != 3; i += 1 {
-		var allPass = true
-
-		for listKey, wayP := range waysList {
-
-			for nodeKey, idNode := range wayP.NodeIDs {
-
-				idNodeString := strconv.FormatInt(idNode, 10)
-				coordinate, found := radixTreeWays.Get(idNodeString)
-				if found == true && coordinate.([2]float64)[0] != 0.0 && coordinate.([2]float64)[1] != 0.0 {
-					waysListProcessed[listKey].Loc[nodeKey] = coordinate.([2]float64)
-				} else {
-
-					allPass = false
-					err, coordinateFromServer := getNodeByApiOsm(idNode)
-					if err != nil {
-
-						_ = log.Errorf("gosmImport.populate.getNodeByApiOsm.error: %v", err)
-						// todo: arquivar em banco os errors na hora de pegar
-						//waysListProcessed[listKey].Data["error"] = true
-
-						//wayError := wayError{Id: waysListProcessed[listKey].Id}
-						//query := mongodb.QueryStt{
-						//  Query: bson.M{"id": wayError.Id},
-						//}
-						//if wayErrorToDb.Count(&query) == 0 {
-						//  wayErrorToDb.Insert(wayError)
-						//}
-					}
-
-					if coordinateFromServer.Lon == 0 && coordinateFromServer.Lat == 0 {
-						continue
-					}
-
-					err = AppendNodeToFile(inputFile, coordinateFromServer.Id, coordinateFromServer.Lon, coordinateFromServer.Lat)
-					if err != nil {
-						_ = log.Errorf("gosmImport.populate.AppendLonLatToFile.error: %v", err)
-						continue
-					}
-
-					radixTreeWays.Insert(idNodeString, [2]float64{coordinateFromServer.Lon, coordinateFromServer.Lat})
-					waysListProcessed[listKey].Loc[nodeKey] = [2]float64{coordinateFromServer.Lon, coordinateFromServer.Lat}
-				}
-			}
-		}
-
-		if allPass == true {
-			break
-		}
-	}
-
-	verify(db)
-}
-
-func verify(db iotmaker_db_interface.DbFunctionsInterface) {
-	var err error
-
-	for wayKey := range waysListProcessed {
-		pass := true
-		for k := range waysListProcessed[wayKey].Loc {
-			if waysListProcessed[wayKey].Loc[k][0] == 0.0 && waysListProcessed[wayKey].Loc[k][1] == 0.0 {
-				fmt.Printf("fixme: entrou. id: %v\n", waysList[wayKey].NodeIDs[k])
-
-				err, wayTag := getWayByApiOsm(waysList[wayKey].ID)
-				if err != nil {
-					pass = false
-				} else {
-
-					waysListProcessed[wayKey].Tag = make(map[string]string)
-					for _, v := range wayTag.Tag {
-						waysListProcessed[wayKey].Tag[v.Key] = v.Value
-					}
-
-					waysListProcessed[wayKey].Loc = make([][2]float64, len(wayTag.Loc))
-					waysListProcessed[wayKey].Rad = make([][2]float64, len(wayTag.Loc))
-
-					for kNode, v := range wayTag.Loc {
-						waysListProcessed[wayKey].Loc[kNode] = v
-						waysListProcessed[wayKey].Rad[kNode] = [2]float64{utilMath.DegreesToRadians(v[0]), utilMath.DegreesToRadians(v[1])}
-					}
-
-				}
-
-				break
-			}
-		}
-
-		if pass == false {
-			notFoundCount += 1
-			fmt.Printf("way id: %v, not found\n", waysListProcessed[wayKey].Id)
-		} else {
-
-			geoMathWay := waysListProcessed[wayKey]
-
-			geoMathWay.MakeGeoJSonFeature()
-			geoMathWay.Init()
-			geoMathWay.MakeMD5()
-
-			err = db.Insert("way", geoMathWay)
-			if err != nil {
-				_ = log.Errorf("gosmImport.verify.geoMathWay.insert.error: %v", err)
-			}
-
-			if geoMathWay.Tag["type"] == "multipolygon" || geoMathWay.IsPolygon() == true {
-
-				polygon := iotmaker_geo_osm.PolygonStt{}
-				polygon.Id = geoMathWay.Id
-				polygon.Tag = geoMathWay.Tag
-				polygon.UId = int64(geoMathWay.UId)
-				polygon.ChangeSet = int64(geoMathWay.Changeset)
-				polygon.User = geoMathWay.User
-				polygon.TimeStamp = geoMathWay.TimeStamp
-				polygon.Version = int64(geoMathWay.Version)
-				polygon.Visible = geoMathWay.Visible
-				polygon.AddWayAsPolygon(&geoMathWay)
-				polygon.MakeGeoJSonFeature()
-				polygon.Init()
-				polygon.MakeMD5()
-
-				deleteTagsUnnecessary(&polygon.Tag)
-
-				err = db.Insert("polygon", polygon)
-				if err != nil {
-					_ = log.Errorf("gosmImport.verify.polygon.insert.error: %v", err)
-				}
-			}
-		}
-	}
+type _ToJSonCache struct {
+	ID  int64
+	Lat float64
+	Lon float64
 }
