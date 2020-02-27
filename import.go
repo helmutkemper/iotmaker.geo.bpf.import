@@ -27,6 +27,8 @@ type Import struct {
 	dirFromBinaryFiles string
 
 	unnecessaryTags map[string]string
+
+	DontFindDuplicatedId bool
 }
 
 func (el *Import) SetMapFilePath(path string) error {
@@ -181,7 +183,7 @@ func (el *Import) FileManagerFindLonLatInFile(idToFind int64) (error, float64, f
 	var err error
 	var lon, lat float64
 
-	err, lon, lat = el.FindLonLatByIdInFile(idToFind)
+	err, lon, lat = el.FindLonLatByIdInFileAndDownload(idToFind)
 	return err, lon, lat
 }
 
@@ -377,6 +379,10 @@ func (el *Import) ProcessWaysFromMapFile(externalFunction func(wayConverted WayC
 			case *osmpbf.Way:
 
 				err, wayConverted = el.PopulateWay(v.(*osmpbf.Way))
+				if err != nil {
+					return err
+				}
+
 				externalFunction(*wayConverted)
 
 			case *osmpbf.Relation:
@@ -403,9 +409,13 @@ func (el *Import) AppendLonLatToFile(idIn int64, lonIn, latIn float64) error {
 		return err
 	}
 
-	err, _, _ = el.FindLonLatByIdInFile(idIn)
-	if err == nil {
-		return nil
+	if el.DontFindDuplicatedId == true {
+		err, _, _ = el.FindLonLatByIdInFile(idIn)
+		if err != nil {
+			if err.Error() != "id not found" {
+				return err
+			}
+		}
 	}
 
 	nodesFile, err = os.OpenFile(fileIn, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
@@ -468,6 +478,34 @@ func (el *Import) applyRuleToBinaryFile(id int64) (error, string) {
 	filePath := el.dirFromBinaryFiles + idFileStr + ".bin"
 
 	return nil, filePath
+}
+
+func (el *Import) FindLonLatByIdInFileAndDownload(idToFind int64) (error, float64, float64) {
+	var err error
+	var node NodesTagStt
+	var lon, lat float64
+
+	err, lon, lat = el.FindLonLatByIdInFile(idToFind)
+	if err != nil {
+		if err.Error() != "id not found" {
+			return err, 0.0, 0.0
+		} else {
+			err, node = DownloadNodeByApiOsm(idToFind)
+			if err != nil {
+				return err, 0.0, 0.0
+			}
+
+			lon = node.Lon
+			lat = node.Lat
+		}
+	}
+
+	err = el.AppendLonLatToFile(idToFind, lon, lat)
+	if err != nil {
+		return err, 0.0, 0.0
+	}
+
+	return nil, lon, lat
 }
 
 func (el *Import) FindLonLatByIdInFile(idToFind int64) (error, float64, float64) {

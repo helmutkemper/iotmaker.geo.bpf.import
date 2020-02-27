@@ -3,7 +3,6 @@ package iotmaker_geo_pbf_import
 import (
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"strconv"
@@ -72,76 +71,70 @@ type NodesRefTagStt struct {
 }
 
 // faz o download das informações de um node
-func getNodeByApiOsm(idNode int64) (error, NodesTagStt) {
+func DownloadNodeByApiOsm(idNode int64) (error, NodesTagStt) {
 	var body []byte
 	var err error
-	var fileName = "/media/kemper/c5d4fd1f-1a7e-4bdd-8124-e2ad60e187761/nodes/" + strconv.FormatInt(idNode, 10) + ".xml"
+	var resp *http.Response
 
 	nodeRemote := OsmNodeTagStt{}
 
-	body, err = ioutil.ReadFile(fileName)
-	if err != nil || len(body) == 0 {
-		resp, err := http.Get(kOsmApi06UrlNode + strconv.FormatInt(idNode, 10))
-		if err != nil {
-			fmt.Printf("getNodeByApiOsm.http.Get.error: %v\nid: %v\n", err, idNode)
-			return errors.New("osm api return error"), NodesTagStt{}
-		}
+	resp, err = http.Get(kOsmApi06UrlNode + strconv.FormatInt(idNode, 10))
+	if err != nil {
+		return err, NodesTagStt{}
+	}
 
-		body, err = ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if len(body) != 0 {
-			err = ioutil.WriteFile(fileName, body, 0644)
-			if err != nil {
-				fmt.Printf("getNodeByApiOsm.ioutil.WriteFile.error: %v\nid: %v\n", err, idNode)
-			}
-		}
+	body, err = ioutil.ReadAll(resp.Body)
+	err = resp.Body.Close()
+	if err != nil {
+		return err, NodesTagStt{}
 	}
 
 	err = xml.Unmarshal(body, &nodeRemote)
 	if err != nil {
-		fmt.Printf("getNodeByApiOsm.xml.Unmarshal.error: %v\nid: %v\n", err, idNode)
 		return err, NodesTagStt{}
 	}
 
 	if nodeRemote.Node.Lat == 0.0 && nodeRemote.Node.Lon == 0.0 {
-		fmt.Printf("getNodeByApiOsm.nodeRemote.Lat == 0.0 && getNodeByApiOsm.nodeRemote.Lon == 0.0\nid: %v\n", idNode)
-		return err, NodesTagStt{}
+		return errors.New("unknown error"), NodesTagStt{}
 	}
 
 	return nil, nodeRemote.Node
 }
 
 // faz o download das informações de um node
-func getWayByApiOsm(idNode int64) (error, WaysTagStt) {
+func DownloadWayByApiOsm(idNode int64) (error, WaysTagStt) {
+	var err error
+	var resp *http.Response
+	var body []byte
+
 	wayRemote := OsmWayTagStt{}
 
-	resp, err := http.Get(kOsmApi06UrlWay + strconv.FormatInt(idNode, 10))
+	resp, err = http.Get(kOsmApi06UrlWay + strconv.FormatInt(idNode, 10))
 	if err != nil {
-		fmt.Printf("getWayByApiOsm.http.Get.error: %v", err)
 		return err, WaysTagStt{}
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
+	body, err = ioutil.ReadAll(resp.Body)
+	err = resp.Body.Close()
+	if err != nil {
+		return err, WaysTagStt{}
+	}
 
 	err = xml.Unmarshal(body, &wayRemote)
 	if err != nil {
-		fmt.Printf("getWayByApiOsm.xml.Unmarshal.error: %v\n", err)
 		return err, WaysTagStt{}
 	}
 
 	if len(wayRemote.Way.Ref) == 0 {
-		fmt.Printf("getWayByApiOsm.len.wayRemote.Way.Loc == 0\n")
 		return err, WaysTagStt{}
 	}
 
 	wayRemote.Way.Loc = make([][2]float64, len(wayRemote.Way.Ref))
 
 	for k, idXmlNode := range wayRemote.Way.Ref {
-		err, node := getNodeByApiOsm(idXmlNode.Ref)
+		err, node := DownloadNodeByApiOsm(idXmlNode.Ref)
 		if err != nil {
-			return errors.New("error downloading way id: " + strconv.FormatInt(idNode, 10)), WaysTagStt{}
+			return err, WaysTagStt{}
 		}
 
 		wayRemote.Way.Loc[k] = [2]float64{node.Lon, node.Lat}
