@@ -333,12 +333,127 @@ func (el *Import) ExtractNodesToBinaryFilesDir() error {
 	return nil
 }
 
-func (el *Import) ProcessWaysFromMapFile(externalFunction func(wayConverted WayConverted)) error {
+func (el *Import) GetAllNodesFromMap(functionProcessNode func(node osmpbf.Node)) error {
 	var err error
 
 	err = el.Verify()
 	if err != nil {
 		return err
+	}
+
+	if functionProcessNode == nil {
+		return errors.New("please, set a external function to process all nodes")
+	}
+
+	var v interface{}
+	var f *os.File
+
+	f, err = os.Open(el.mapFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	d := osmpbf.NewDecoder(f)
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return err
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+
+		} else if err != nil {
+			return err
+
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+				functionProcessNode(*v.(*osmpbf.Node))
+
+			case *osmpbf.Way:
+				return nil
+
+			case *osmpbf.Relation:
+				return nil
+
+			}
+		}
+	}
+
+	return nil
+}
+
+func (el *Import) GetAllWaysFromMap(functionProcessWay func(way osmpbf.Way)) error {
+	var err error
+
+	err = el.Verify()
+	if err != nil {
+		return err
+	}
+
+	if functionProcessWay == nil {
+		return errors.New("please, set a external function to process all ways")
+	}
+
+	var v interface{}
+	var f *os.File
+
+	f, err = os.Open(el.mapFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	d := osmpbf.NewDecoder(f)
+	d.SetBufferSize(osmpbf.MaxBlobSize)
+	err = d.Start(runtime.GOMAXPROCS(-1))
+	if err != nil {
+		return err
+	}
+
+	for {
+
+		if v, err = d.Decode(); err == io.EOF {
+			break
+
+		} else if err != nil {
+			return err
+
+		} else {
+			switch v.(type) {
+
+			case *osmpbf.Node:
+				continue
+
+			case *osmpbf.Way:
+
+				functionProcessWay(*v.(*osmpbf.Way))
+
+			case *osmpbf.Relation:
+				return nil
+
+			}
+		}
+	}
+
+	return nil
+}
+
+func (el *Import) ProcessWaysFromMapFile(functionToDecideWhetherTheWayShouldBeProcessedOrNot func(int64) bool, externalFunction func(wayConverted WayConverted)) error {
+	var err error
+
+	err = el.Verify()
+	if err != nil {
+		return err
+	}
+
+	if functionToDecideWhetherTheWayShouldBeProcessedOrNot == nil {
+		return errors.New("please, set a external function to decide if process way")
 	}
 
 	if externalFunction == nil {
@@ -377,6 +492,11 @@ func (el *Import) ProcessWaysFromMapFile(externalFunction func(wayConverted WayC
 				continue
 
 			case *osmpbf.Way:
+
+				process := functionToDecideWhetherTheWayShouldBeProcessedOrNot(v.(*osmpbf.Way).ID)
+				if process == false {
+					continue
+				}
 
 				err, wayConverted = el.PopulateWay(v.(*osmpbf.Way))
 				if err != nil {
