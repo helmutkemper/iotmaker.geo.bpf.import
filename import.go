@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"github.com/helmutkemper/osmpbf"
 	"github.com/helmutkemper/util"
 	"io"
@@ -167,6 +168,15 @@ func (el *Import) CountElements() error {
 	if err != nil {
 		return err
 	}
+
+	//todo: apagar - início
+
+	fmt.Printf("nodes: %v\n", el.nodesCount)
+	fmt.Printf("ways: %v\n", el.waysCount)
+	fmt.Printf("relations: %v\n", el.relationsCount)
+	fmt.Printf("others: %v\n", el.othersCount)
+
+	//todo: apagar - fim
 
 	return nil
 }
