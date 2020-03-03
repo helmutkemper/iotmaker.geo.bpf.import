@@ -404,7 +404,7 @@ func (el *Import) GetAllNodesFromMap(functionProcessNode func(node osmpbf.Node) 
 func (el *Import) GetAllWaysFromMap(functionProcessWay func(way osmpbf.Way), start, end int64) error {
 	var err error
 
-	var wayConter int64 = 0
+	var wayCounter int64 = 0
 
 	err = el.Verify()
 	if err != nil {
@@ -447,17 +447,18 @@ func (el *Import) GetAllWaysFromMap(functionProcessWay func(way osmpbf.Way), sta
 
 			case *osmpbf.Way:
 
-				if wayConter < start {
+				if wayCounter < start {
+					wayCounter += 1
 					continue
 				}
 
-				if wayConter >= end {
+				if wayCounter >= end {
 					return nil
 				}
 
 				functionProcessWay(*v.(*osmpbf.Way))
 
-				wayConter += 1
+				wayCounter += 1
 
 			case *osmpbf.Relation:
 				return nil
