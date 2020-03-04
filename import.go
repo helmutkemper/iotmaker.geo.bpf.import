@@ -343,8 +343,9 @@ func (el *Import) ExtractNodesToBinaryFilesDir() error {
 	return nil
 }
 
-func (el *Import) GetAllNodesFromMap(functionProcessNode func(node osmpbf.Node) int64) error {
+func (el *Import) GetAllNodesFromMap(functionProcessNode func(node osmpbf.Node) int64, start, end int64) error {
 	var err error
+	var counterNodes int64 = 0
 
 	err = el.Verify()
 	if err != nil {
@@ -383,10 +384,22 @@ func (el *Import) GetAllNodesFromMap(functionProcessNode func(node osmpbf.Node) 
 			switch v.(type) {
 
 			case *osmpbf.Node:
+
+				if counterNodes < start {
+					counterNodes += 1
+					continue
+				}
+
+				if counterNodes >= end {
+					return nil
+				}
+
 				count := functionProcessNode(*v.(*osmpbf.Node))
 				if count == 0 {
 					return nil
 				}
+
+				counterNodes += 1
 
 			case *osmpbf.Way:
 				return nil
